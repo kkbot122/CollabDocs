@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { registerWebSocketServer } from "./realtime/ws-server.js";
 
 export function buildApp() {
   const app = Fastify();
@@ -12,6 +13,8 @@ export function buildApp() {
     await db.execute(sql`SELECT 1`);
     return { db: "ok" };
   });
+
+  registerWebSocketServer(app);
 
   return app;
 }
