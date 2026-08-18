@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: collabdocs
+      POSTGRES_USER: collabdocs
+      POSTGRES_PASSWORD: collabdocs
+    ports:
+      - "5432:5432"
+    volumes:
+      - collabdocs-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  collabdocs-postgres-data:
