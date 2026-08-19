@@ -21,6 +21,18 @@ describe("RoomManager", () => {
     expect(manager.hasRoom("document-a")).toBe(false);
   });
 
+  it("creates one Y.Doc per active room and reuses it for later joins", () => {
+    const manager = new RoomManager();
+    const firstSocket = new FakeSocket();
+    const secondSocket = new FakeSocket();
+
+    const firstRoom = manager.join("document-a", firstSocket);
+    const secondRoom = manager.join("document-a", secondSocket);
+
+    expect(secondRoom).toBe(firstRoom);
+    expect(manager.getRoom("document-a")?.doc).toBe(firstRoom.doc);
+  });
+
   it("makes leave idempotent", () => {
     const manager = new RoomManager();
     const socket = new FakeSocket();
@@ -59,5 +71,53 @@ describe("RoomManager", () => {
 
     expect(roomAPeer.messages).toEqual(["room-a payload"]);
     expect(roomBPeer.messages).toEqual([]);
+  });
+
+  it("keeps Y.Doc content isolated between rooms", () => {
+    const manager = new RoomManager();
+    const roomASocket = new FakeSocket();
+    const roomBSocket = new FakeSocket();
+
+    const roomA = manager.join("document-a", roomASocket);
+    const roomB = manager.join("document-b", roomBSocket);
+    roomA.doc.getText("content").insert(0, "room A");
+
+    expect(roomA.doc.getText("content").toString()).toBe("room A");
+    expect(roomB.doc.getText("content").toString()).toBe("");
+  });
+
+  it("destroys the Y.Doc and clears sockets after the last leave", () => {
+    const manager = new RoomManager();
+    const firstSocket = new FakeSocket();
+    const secondSocket = new FakeSocket();
+    const room = manager.join("document-a", firstSocket);
+    manager.join("document-a", secondSocket);
+
+    manager.leave("document-a", firstSocket);
+    expect(room.doc.isDestroyed).toBe(false);
+
+    manager.leave("document-a", secondSocket);
+
+    expect(room.doc.isDestroyed).toBe(true);
+    expect(room.sockets).toHaveLength(0);
+    expect(manager.getRoom("document-a")).toBeUndefined();
+  });
+
+  it("detaches room update observers during destruction", () => {
+    const manager = new RoomManager();
+    const socket = new FakeSocket();
+    const room = manager.join("document-a", socket);
+    let updates = 0;
+    room.observeUpdates(() => {
+      updates += 1;
+    });
+
+    room.doc.getText("content").insert(0, "before leave");
+    expect(updates).toBe(1);
+
+    manager.leave("document-a", socket);
+
+    expect(room.doc.isDestroyed).toBe(true);
+    expect(updates).toBe(1);
   });
 });
