@@ -1,7 +1,7 @@
 import * as Y from "yjs";
 
 export interface TransportSocket {
-  send(payload: string): void;
+  send(payload: string | Uint8Array): void;
 }
 
 export type RoomUpdateObserver = (update: Uint8Array, origin: unknown) => void;
@@ -72,7 +72,7 @@ export class RoomManager {
   broadcast(
     docId: string,
     sender: TransportSocket,
-    payload: string,
+    payload: string | Uint8Array,
   ): void {
     const room = this.rooms.get(docId);
 

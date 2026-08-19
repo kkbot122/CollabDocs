@@ -1,7 +1,11 @@
 import fastifyWebsocket from "@fastify/websocket";
 import type { FastifyInstance } from "fastify";
 import type { RawData } from "ws";
-import { TEMPORARY_TRANSPORT_TEST_PAYLOAD } from "../transport-test-fixture.js";
+import {
+  encodeSyncUpdate,
+  isRemoteUpdateOrigin,
+  readSyncFrame,
+} from "./protocol-codec.js";
 import { RoomManager } from "./room-manager.js";
 
 interface WebSocketQuery {
@@ -10,6 +14,27 @@ interface WebSocketQuery {
 
 function hasValidDocId(docId: unknown): docId is string {
   return typeof docId === "string" && docId.trim().length > 0;
+}
+
+function rawDataToUint8Array(message: RawData): Uint8Array {
+  if (Array.isArray(message)) {
+    const length = message.reduce((total, chunk) => total + chunk.byteLength, 0);
+    const combined = new Uint8Array(length);
+    let offset = 0;
+
+    for (const chunk of message) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+
+    return combined;
+  }
+
+  if (message instanceof ArrayBuffer) {
+    return new Uint8Array(message);
+  }
+
+  return new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
 }
 
 export function registerWebSocketServer(
@@ -36,15 +61,30 @@ export function registerWebSocketServer(
           return;
         }
 
-        roomManager.join(docId, socket);
+        const room = roomManager.join(docId, socket);
 
         const onMessage = (message: RawData): void => {
-          if (message.toString() === TEMPORARY_TRANSPORT_TEST_PAYLOAD) {
-            roomManager.broadcast(
-              docId,
-              socket,
-              TEMPORARY_TRANSPORT_TEST_PAYLOAD,
-            );
+          const updates: Uint8Array[] = [];
+          const stopObserving = room.observeUpdates((update, origin) => {
+            if (isRemoteUpdateOrigin(origin)) {
+              updates.push(update);
+            }
+          });
+
+          try {
+            const reply = readSyncFrame(rawDataToUint8Array(message), room.doc);
+
+            for (const update of updates) {
+              roomManager.broadcast(docId, socket, encodeSyncUpdate(update));
+            }
+
+            if (reply.byteLength > 0) {
+              socket.send(reply);
+            }
+          } catch {
+            socket.close(1002, "Invalid sync frame");
+          } finally {
+            stopObserving();
           }
         };
 

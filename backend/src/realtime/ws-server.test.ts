@@ -2,7 +2,6 @@ import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { buildApp } from "../app.js";
-import { TEMPORARY_TRANSPORT_TEST_PAYLOAD } from "../transport-test-fixture.js";
 
 const openServer = async () => {
   const app = buildApp();
@@ -17,7 +16,7 @@ const openServer = async () => {
   return { app, url: `ws://127.0.0.1:${address.port}/ws` };
 };
 
-describe("temporary WebSocket transport", () => {
+describe("WebSocket server", () => {
   const clients: WebSocket[] = [];
 
   afterEach(() => {
@@ -25,33 +24,6 @@ describe("temporary WebSocket transport", () => {
       client.on("error", () => undefined);
       client.terminate();
     }
-  });
-
-  it("echoes the temporary payload and closes cleanly", async () => {
-    const { app, url } = await openServer();
-    const client = new WebSocket(`${url}?docId=transport-test`);
-    const peer = new WebSocket(`${url}?docId=transport-test`);
-    client.on("error", () => undefined);
-    peer.on("error", () => undefined);
-    clients.push(client);
-    clients.push(peer);
-
-    await once(client, "open");
-    await once(peer, "open");
-    const messagePromise = once(peer, "message");
-    client.send(TEMPORARY_TRANSPORT_TEST_PAYLOAD);
-
-    const [message] = await messagePromise;
-    expect(message.toString()).toBe(TEMPORARY_TRANSPORT_TEST_PAYLOAD);
-
-    expect(client.listenerCount("message")).toBe(0);
-
-    const closePromise = once(client, "close");
-    client.close(1000, "test complete");
-    const [code] = await closePromise;
-    expect(code).toBe(1000);
-
-    await app.close();
   });
 
   it("rejects a missing docId during the upgrade", async () => {
