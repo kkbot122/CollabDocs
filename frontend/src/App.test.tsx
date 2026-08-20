@@ -7,5 +7,6 @@ describe("App", () => {
     const markup = renderToStaticMarkup(<App />);
 
     expect(markup).toContain("<h1>CollabDocs</h1>");
+    expect(markup).toContain("Shared plain-text document");
   });
 });
