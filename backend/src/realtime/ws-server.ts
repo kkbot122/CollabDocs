@@ -4,6 +4,7 @@ import type { RawData } from "ws";
 import {
   encodeSyncUpdate,
   isRemoteUpdateOrigin,
+  readAwarenessFrame,
   readSyncFrame,
 } from "./protocol-codec.js";
 import { RoomManager } from "./room-manager.js";
@@ -72,7 +73,15 @@ export function registerWebSocketServer(
           });
 
           try {
-            const reply = readSyncFrame(rawDataToUint8Array(message), room.doc);
+            const frame = rawDataToUint8Array(message);
+            const frameKind = frame[0];
+
+            if (frameKind === 1) {
+              readAwarenessFrame(frame, room.awareness, socket);
+              return;
+            }
+
+            const reply = readSyncFrame(frame, room.doc);
 
             for (const update of updates) {
               roomManager.broadcast(docId, socket, encodeSyncUpdate(update));
