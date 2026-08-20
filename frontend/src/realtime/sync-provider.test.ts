@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import * as awareness from "y-protocols/awareness";
 import * as Y from "yjs";
 import { registerWebSocketServer } from "../../../backend/src/realtime/ws-server";
 import { RoomManager } from "../../../backend/src/realtime/room-manager";
@@ -8,7 +9,11 @@ import {
   type WebSocketLike,
   type WebSocketMessage,
 } from "./ws-client";
-import { NETWORK_ORIGIN, encodeSyncUpdate } from "./sync-protocol";
+import {
+  encodeAwarenessUpdate,
+  NETWORK_ORIGIN,
+  encodeSyncUpdate,
+} from "./sync-protocol";
 import { SyncProvider } from "./sync-provider";
 
 const textOf = (doc: Y.Doc): string => doc.getText("content").toString();
@@ -138,6 +143,87 @@ describe("SyncProvider", () => {
     expect(roomManager.getRoom("provider-test")).toBeDefined();
   });
 
+  it("propagates local Awareness state and graceful removal", async () => {
+    const roomManager = new RoomManager();
+    const app = Fastify();
+    apps.push(app);
+    registerWebSocketServer(app, roomManager);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Test server did not expose a TCP address");
+    }
+
+    const url = `ws://127.0.0.1:${address.port}/ws`;
+    const createSocket = (socketUrl: string): WebSocketLike =>
+      new WebSocket(socketUrl) as unknown as WebSocketLike;
+    const providerA = new SyncProvider(url, "awareness-test", { createSocket });
+    const providerB = new SyncProvider(url, "awareness-test", { createSocket });
+    providers.push(providerA, providerB);
+
+    await Promise.all([
+      waitForStatus(providerA, "connected"),
+      waitForStatus(providerB, "connected"),
+    ]);
+
+    providerA.awareness.setLocalState({ user: { id: "a", name: "A" } });
+    await waitFor(
+      () => [...providerB.awareness.getStates().values()].some(
+        (state) => state.user?.id === "a",
+      ),
+      (notify) => {
+        const listener = (): void => notify();
+        providerB.awareness.on("change", listener);
+        return () => providerB.awareness.off("change", listener);
+      },
+    );
+
+    providerA.destroy();
+    await waitFor(
+      () => ![...providerB.awareness.getStates().values()].some(
+        (state) => state.user?.id === "a",
+      ),
+      (notify) => {
+        const listener = (): void => notify();
+        providerB.awareness.on("change", listener);
+        return () => providerB.awareness.off("change", listener);
+      },
+    );
+  });
+
+  it("does not echo a network-origin Awareness update", async () => {
+    let socket: FakeSocket | undefined;
+    const provider = new SyncProvider("ws://localhost:3000/ws", "doc", {
+      createSocket: () => {
+        socket = new FakeSocket();
+        return socket;
+      },
+    });
+    socket?.open();
+
+    const source = new Y.Doc();
+    const sourceAwareness = new awareness.Awareness(source);
+    sourceAwareness.setLocalState({ user: { id: "remote" } });
+    socket?.receive(
+      encodeAwarenessUpdate(sourceAwareness, [sourceAwareness.clientID]).buffer,
+    );
+
+    await waitFor(
+      () => [...provider.awareness.getStates().values()].some(
+        (state) => state.user?.id === "remote",
+      ),
+      (notify) => {
+        const listener = (): void => notify();
+        provider.awareness.on("change", listener);
+        return () => provider.awareness.off("change", listener);
+      },
+    );
+
+    expect(socket?.sent).toHaveLength(2);
+    provider.destroy();
+    sourceAwareness.destroy();
+  });
+
   it("does not resend a network-origin update and stops after destroy", async () => {
     let socket: FakeSocket | undefined;
     const provider = new SyncProvider("ws://localhost:3000/ws", "doc", {
@@ -148,7 +234,7 @@ describe("SyncProvider", () => {
     });
 
     socket?.open();
-    expect(socket?.sent).toHaveLength(1);
+    expect(socket?.sent).toHaveLength(2);
 
     const source = new Y.Doc();
     let update: Uint8Array | undefined;
@@ -167,12 +253,12 @@ describe("SyncProvider", () => {
         return () => provider.doc.off("update", listener);
       },
     );
-    expect(socket?.sent).toHaveLength(1);
-
+    expect(socket?.sent).toHaveLength(2);
     provider.destroy();
     expect(socket?.closeCalls).toBe(1);
     provider.doc.getText("content").insert(0, "after destroy");
-    expect(socket?.sent).toHaveLength(1);
+    provider.awareness.setLocalState({ user: { id: "after destroy" } });
+    expect(socket?.sent).toHaveLength(3);
   });
 
   it("exposes status transitions", () => {

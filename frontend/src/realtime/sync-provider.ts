@@ -1,8 +1,12 @@
 import * as Y from "yjs";
+import * as awareness from "y-protocols/awareness";
 import {
+  encodeAwarenessUpdate,
   encodeSyncStep1,
   encodeSyncUpdate,
+  NETWORK_AWARENESS_ORIGIN,
   NETWORK_ORIGIN,
+  readAwarenessFrame,
   readSyncFrame,
 } from "./sync-protocol";
 import {
@@ -20,6 +24,7 @@ export interface SyncProviderOptions {
 
 export class SyncProvider {
   readonly doc = new Y.Doc();
+  readonly awareness = new awareness.Awareness(this.doc);
 
   private statusValue: SyncStatus = "connecting";
   private destroyed = false;
@@ -28,6 +33,23 @@ export class SyncProvider {
   private readonly unsubscribeOpen: () => void;
   private readonly unsubscribeMessage: () => void;
   private readonly unsubscribeClose: () => void;
+  private readonly handleAwarenessUpdate = (
+    change: { added: number[]; updated: number[]; removed: number[] },
+    origin: unknown,
+  ): void => {
+    if (origin === NETWORK_AWARENESS_ORIGIN || this.destroyed) {
+      return;
+    }
+
+    const clientIds = [
+      ...change.added,
+      ...change.updated,
+      ...change.removed,
+    ];
+    if (clientIds.length > 0) {
+      this.socket.send(encodeAwarenessUpdate(this.awareness, clientIds));
+    }
+  };
   private readonly handleDocUpdate = (
     update: Uint8Array,
     origin: unknown,
@@ -53,6 +75,7 @@ export class SyncProvider {
     this.unsubscribeOpen = this.socket.onOpen(() => {
       this.setStatus("connected");
       this.socket.send(encodeSyncStep1(this.doc));
+      this.sendCurrentAwarenessState();
     });
     this.unsubscribeMessage = this.socket.onMessage((message) => {
       void this.handleMessage(message);
@@ -61,6 +84,7 @@ export class SyncProvider {
       this.setStatus("disconnected");
     });
     this.doc.on("update", this.handleDocUpdate);
+    this.awareness.on("update", this.handleAwarenessUpdate);
     this.socket.connect();
   }
 
@@ -77,18 +101,34 @@ export class SyncProvider {
     return () => this.statusListeners.delete(listener);
   }
 
+  sendCurrentAwarenessState(): boolean {
+    if (this.destroyed || this.awareness.getLocalState() === null) {
+      return false;
+    }
+
+    return this.socket.send(
+      encodeAwarenessUpdate(this.awareness, [this.awareness.clientID]),
+    );
+  }
+
   destroy(): void {
     if (this.destroyed) {
       return;
     }
 
+    if (this.awareness.getLocalState() !== null) {
+      this.awareness.setLocalState(null);
+    }
+
     this.destroyed = true;
     this.doc.off("update", this.handleDocUpdate);
+    this.awareness.off("update", this.handleAwarenessUpdate);
     this.unsubscribeOpen();
     this.unsubscribeMessage();
     this.unsubscribeClose();
     this.socket.destroy();
     this.statusListeners.clear();
+    this.awareness.destroy();
     this.doc.destroy();
   }
 
@@ -99,7 +139,9 @@ export class SyncProvider {
 
     try {
       const frame = await toUint8Array(message);
-      const reply = readSyncFrame(frame, this.doc);
+      const reply = frame[0] === 1
+        ? (readAwarenessFrame(frame, this.awareness), new Uint8Array())
+        : readSyncFrame(frame, this.doc);
 
       if (reply.byteLength > 0) {
         this.socket.send(reply);
