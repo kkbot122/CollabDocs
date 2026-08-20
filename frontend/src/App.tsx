@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Editor } from "./components/Editor";
+import { PresenceList } from "./components/PresenceList";
 import { SyncProvider } from "./realtime/sync-provider";
 
 const DOCUMENT_ID = "t017-demo-document";
@@ -14,6 +15,11 @@ export function App() {
 
   useEffect(() => {
     const nextProvider = new SyncProvider(websocketUrl(), DOCUMENT_ID);
+    nextProvider.awareness.setLocalStateField("user", {
+      name: `Temporary user ${nextProvider.awareness.clientID}`,
+      color: "#2563eb",
+      colorLight: "#bfdbfe",
+    });
     setProvider(nextProvider);
     return () => nextProvider.destroy();
   }, []);
@@ -22,7 +28,14 @@ export function App() {
     <main>
       <h1>CollabDocs</h1>
       <p>Shared plain-text document</p>
-      {provider ? <Editor provider={provider} /> : <p>Connecting…</p>}
+      {provider ? (
+        <>
+          <PresenceList awareness={provider.awareness} />
+          <Editor provider={provider} />
+        </>
+      ) : (
+        <p>Connecting…</p>
+      )}
     </main>
   );
 }

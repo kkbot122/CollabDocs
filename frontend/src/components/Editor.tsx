@@ -23,9 +23,7 @@ export function Editor({ provider }: EditorProps) {
       doc: ytext.toString(),
       extensions: [
         basicSetup,
-        // Awareness is intentionally omitted until T018. Passing null keeps
-        // yCollab's document-sync plugin while disabling cursor decorations.
-        yCollab(ytext, null, { undoManager: false }),
+        yCollab(ytext, provider.awareness, { undoManager: false }),
       ],
     });
     const view = new EditorView({ state, parent });
