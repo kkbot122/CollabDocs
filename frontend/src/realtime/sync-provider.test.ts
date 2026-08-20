@@ -1,0 +1,229 @@
+import Fastify from "fastify";
+import { afterEach, describe, expect, it } from "vitest";
+import * as Y from "yjs";
+import { registerWebSocketServer } from "../../../backend/src/realtime/ws-server";
+import { RoomManager } from "../../../backend/src/realtime/room-manager";
+import {
+  BrowserWebSocketClient,
+  type WebSocketLike,
+  type WebSocketMessage,
+} from "./ws-client";
+import { NETWORK_ORIGIN, encodeSyncUpdate } from "./sync-protocol";
+import { SyncProvider } from "./sync-provider";
+
+const textOf = (doc: Y.Doc): string => doc.getText("content").toString();
+
+const waitFor = (
+  check: () => boolean,
+  subscribe: (notify: () => void) => () => void,
+): Promise<void> =>
+  new Promise((resolve) => {
+    const notify = (): void => {
+      if (!check()) {
+        return;
+      }
+      unsubscribe();
+      resolve();
+    };
+    const unsubscribe = subscribe(notify);
+    notify();
+  });
+
+const waitForStatus = (
+  provider: SyncProvider,
+  expected: "connected" | "disconnected",
+): Promise<void> =>
+  waitFor(
+    () => provider.status === expected,
+    (notify) => provider.onStatus(notify),
+  );
+
+const waitForEqualText = (first: Y.Doc, second: Y.Doc): Promise<void> =>
+  waitFor(
+    () => textOf(first) === textOf(second),
+    (notify) => {
+      const handleUpdate = (): void => notify();
+      first.on("update", handleUpdate);
+      second.on("update", handleUpdate);
+      return () => {
+        first.off("update", handleUpdate);
+        second.off("update", handleUpdate);
+      };
+    },
+  );
+
+class FakeSocket implements WebSocketLike {
+  readonly sent: Array<string | ArrayBuffer | ArrayBufferView | Blob> = [];
+  readyState = 0;
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<WebSocketMessage>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  closeCalls = 0;
+
+  send(data: string | ArrayBuffer | ArrayBufferView | Blob): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+    this.readyState = 3;
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.(new Event("open"));
+  }
+
+  receive(data: ArrayBuffer): void {
+    this.onmessage?.(new MessageEvent("message", { data }));
+  }
+}
+
+describe("SyncProvider", () => {
+  const apps: ReturnType<typeof Fastify>[] = [];
+  const providers: SyncProvider[] = [];
+
+  afterEach(async () => {
+    for (const provider of providers.splice(0)) {
+      provider.destroy();
+    }
+    for (const app of apps.splice(0)) {
+      await app.close();
+    }
+  });
+
+  it("converges two providers through the real server in both directions", async () => {
+    const roomManager = new RoomManager();
+    const app = Fastify();
+    apps.push(app);
+    registerWebSocketServer(app, roomManager);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Test server did not expose a TCP address");
+    }
+
+    const url = `ws://127.0.0.1:${address.port}/ws`;
+    const providerA = new SyncProvider(url, "provider-test", {
+      createSocket: (socketUrl) =>
+        new WebSocket(socketUrl) as unknown as WebSocketLike,
+    });
+    const providerB = new SyncProvider(url, "provider-test", {
+      createSocket: (socketUrl) =>
+        new WebSocket(socketUrl) as unknown as WebSocketLike,
+    });
+    providers.push(providerA, providerB);
+
+    providerA.doc.getText("content").insert(0, "from A");
+    providerB.doc.getText("content").insert(0, "from B");
+
+    await Promise.all([
+      waitForStatus(providerA, "connected"),
+      waitForStatus(providerB, "connected"),
+    ]);
+    await waitForEqualText(providerA.doc, providerB.doc);
+
+    providerA.doc
+      .getText("content")
+      .insert(providerA.doc.getText("content").length, " + later A");
+    await waitForEqualText(providerA.doc, providerB.doc);
+
+    providerB.doc
+      .getText("content")
+      .insert(providerB.doc.getText("content").length, " + later B");
+    await waitForEqualText(providerA.doc, providerB.doc);
+
+    expect(textOf(providerA.doc)).toBe(textOf(providerB.doc));
+    expect(roomManager.getRoom("provider-test")).toBeDefined();
+  });
+
+  it("does not resend a network-origin update and stops after destroy", async () => {
+    let socket: FakeSocket | undefined;
+    const provider = new SyncProvider("ws://localhost:3000/ws", "doc", {
+      createSocket: () => {
+        socket = new FakeSocket();
+        return socket;
+      },
+    });
+
+    socket?.open();
+    expect(socket?.sent).toHaveLength(1);
+
+    const source = new Y.Doc();
+    let update: Uint8Array | undefined;
+    source.once("update", (value) => {
+      update = value;
+    });
+    source.getText("content").insert(0, "remote");
+    expect(update).toBeDefined();
+
+    socket?.receive(encodeSyncUpdate(update as Uint8Array).buffer);
+    await waitFor(
+      () => textOf(provider.doc) === "remote",
+      (notify) => {
+        const listener = (): void => notify();
+        provider.doc.on("update", listener);
+        return () => provider.doc.off("update", listener);
+      },
+    );
+    expect(socket?.sent).toHaveLength(1);
+
+    provider.destroy();
+    expect(socket?.closeCalls).toBe(1);
+    provider.doc.getText("content").insert(0, "after destroy");
+    expect(socket?.sent).toHaveLength(1);
+  });
+
+  it("exposes status transitions", () => {
+    let socket: FakeSocket | undefined;
+    const statuses: string[] = [];
+    const provider = new SyncProvider("ws://localhost:3000/ws", "doc", {
+      createSocket: () => {
+        socket = new FakeSocket();
+        return socket;
+      },
+    });
+    provider.onStatus((status) => statuses.push(status));
+
+    socket?.open();
+    socket?.close();
+    socket?.onclose?.(new CloseEvent("close", { code: 1000 }));
+
+    expect(provider.status).toBe("disconnected");
+    expect(statuses).toEqual(["connected", "disconnected"]);
+    provider.destroy();
+  });
+
+  it("uses the network origin for inbound protocol application", async () => {
+    let socket: FakeSocket | undefined;
+    const provider = new SyncProvider("ws://localhost:3000/ws", "doc", {
+      createSocket: () => {
+        socket = new FakeSocket();
+        return socket;
+      },
+    });
+    socket?.open();
+
+    const origins: unknown[] = [];
+    provider.doc.on("update", (_update, origin) => origins.push(origin));
+    const source = new Y.Doc();
+    let update: Uint8Array | undefined;
+    source.once("update", (value) => {
+      update = value;
+    });
+    source.getText("content").insert(0, "remote");
+    socket?.receive(encodeSyncUpdate(update as Uint8Array).buffer);
+
+    await waitFor(
+      () => origins.length === 1,
+      (notify) => {
+        const listener = (): void => notify();
+        provider.doc.on("update", listener);
+        return () => provider.doc.off("update", listener);
+      },
+    );
+    expect(origins[0]).toBe(NETWORK_ORIGIN);
+    provider.destroy();
+  });
+});
