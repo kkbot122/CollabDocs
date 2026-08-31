@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TEMPORARY_TRANSPORT_TEST_PAYLOAD } from "../transport-test-fixture";
 import {
   BrowserWebSocketClient,
@@ -49,6 +49,10 @@ class FakeSocket implements WebSocketLike {
 }
 
 describe("BrowserWebSocketClient", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("connects, sends text and binary data, and receives messages", () => {
     let socket: FakeSocket | undefined;
     const client = new BrowserWebSocketClient(
@@ -121,5 +125,73 @@ describe("BrowserWebSocketClient", () => {
     expect(socket?.closeCalls).toBe(1);
     expect(signalCount).toBe(0);
     expect(client.send("after destroy")).toBe(false);
+  });
+
+  it("reconnects after a drop with bounded backoff and one active socket", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const statuses: string[] = [];
+    const client = new BrowserWebSocketClient(
+      "ws://localhost:3000/ws",
+      "doc",
+      (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      { initialRetryDelayMs: 100, maxRetryDelayMs: 250, jitterRatio: 0 },
+    );
+    client.onStatus((status) => statuses.push(status));
+
+    client.connect();
+    expect(sockets).toHaveLength(1);
+    sockets[0].open();
+    sockets[0].remoteClose();
+    client.connect();
+    expect(sockets).toHaveLength(1);
+
+    vi.advanceTimersByTime(99);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(2);
+    expect(client.getStatus()).toBe("reconnecting");
+    sockets[1].remoteClose();
+    vi.advanceTimersByTime(199);
+    expect(sockets).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(3);
+    sockets[2].open();
+
+    expect(client.getStatus()).toBe("open");
+    expect(client.getConnectionGeneration()).toBe(2);
+    expect(statuses).toEqual([
+      "connecting",
+      "open",
+      "reconnecting",
+      "open",
+    ]);
+  });
+
+  it("cancels a pending reconnect on destroy", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = new BrowserWebSocketClient(
+      "ws://localhost:3000/ws",
+      "doc",
+      (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      { initialRetryDelayMs: 100, jitterRatio: 0 },
+    );
+
+    client.connect();
+    sockets[0].remoteClose();
+    client.destroy();
+    vi.advanceTimersByTime(10_000);
+
+    expect(sockets).toHaveLength(1);
+    expect(client.getStatus()).toBe("destroyed");
   });
 });
