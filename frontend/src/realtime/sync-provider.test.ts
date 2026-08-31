@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as awareness from "y-protocols/awareness";
 import * as Y from "yjs";
 import { registerWebSocketServer } from "../../../backend/src/realtime/ws-server";
@@ -73,6 +73,11 @@ class FakeSocket implements WebSocketLike {
   close(): void {
     this.closeCalls += 1;
     this.readyState = 3;
+  }
+
+  remoteClose(): void {
+    this.readyState = 3;
+    this.onclose?.(new CloseEvent("close", { code: 1006 }));
   }
 
   open(): void {
@@ -278,6 +283,40 @@ describe("SyncProvider", () => {
 
     expect(provider.status).toBe("disconnected");
     expect(statuses).toEqual(["connected", "disconnected"]);
+    provider.destroy();
+  });
+
+  it("replays the Yjs handshake and local Awareness after reconnect", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const provider = new SyncProvider("ws://localhost:3000/ws", "doc", {
+      createSocket: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    sockets[0].open();
+    provider.awareness.setLocalState({ user: { id: "local" } });
+    provider.doc.getText("content").insert(0, "retained while disconnected");
+    sockets[0].sent.length = 0;
+
+    sockets[0].remoteClose();
+    expect(provider.status).toBe("disconnected");
+    vi.advanceTimersByTime(20_000);
+    expect(sockets).toHaveLength(2);
+    expect(provider.doc.getText("content").toString()).toBe(
+      "retained while disconnected",
+    );
+
+    sockets[1].open();
+    expect(
+      sockets[1].sent.map(
+        (frame) => new Uint8Array(frame as Uint8Array)[0],
+      ),
+    ).toEqual([0, 1]);
+
     provider.destroy();
   });
 
